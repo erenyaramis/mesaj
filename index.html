@@ -1,0 +1,592 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Gelişmiş Yerel Sohbet</title>
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <script src="https://unpkg.com/mqtt@5.0.5/dist/mqtt.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+    
+    <style>
+        * { box-sizing: border-box; }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f0f2f5; margin: 0; padding: 0;
+            display: flex; justify-content: center; align-items: center; 
+            height: 100dvh;
+            overscroll-behavior: none;
+        }
+        #app-container {
+            width: 100%; max-width: 450px; background: white;
+            height: 100dvh; max-height: 800px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            display: flex; flex-direction: column; position: relative;
+            overflow: hidden;
+        }
+        .header {
+            background-color: #075e54; color: white; padding: 15px;
+            text-align: center; font-size: 1.2rem; font-weight: bold; flex-shrink: 0;
+        }
+        .screen { padding: 20px; flex-grow: 1; display: none; flex-direction: column; overflow: hidden; }
+        .screen.active { display: flex; }
+        
+        input[type="text"] {
+            width: 100%; padding: 12px; margin: 10px 0;
+            border: 1px solid #ccc; border-radius: 5px;
+        }
+        button {
+            background-color: #25d366; color: white; border: none;
+            padding: 12px; border-radius: 5px; cursor: pointer;
+            font-size: 1rem; width: 100%; font-weight: bold; margin-top: 5px;
+            transition: background 0.2s;
+        }
+        button:hover { background-color: #1ebd5a; }
+        button:disabled { background-color: #9cdbaf; cursor: not-allowed; }
+        button.danger { background-color: #dc3545; }
+        button.danger:hover { background-color: #c82333; }
+        button.secondary { background-color: #34b7f1; }
+        button.secondary:hover { background-color: #2a9ecf; }
+
+        .qr-buttons, .modal-buttons { 
+            display: flex; gap: 10px; width: 100%; 
+        }
+        .qr-buttons button, .modal-buttons button { 
+            flex: 1; margin: 0; 
+        }
+        .qr-buttons { margin-bottom: 15px; flex-shrink: 0; }
+        .modal-buttons { margin-top: 15px; }
+
+        #device-list {
+            list-style: none; padding: 0; margin: 15px 0;
+            overflow-y: auto; flex-grow: 1;
+        }
+        #device-list li {
+            background: #e9edef; padding: 12px; border-radius: 8px;
+            margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center;
+        }
+        .connect-btn { width: auto; padding: 8px 15px; margin: 0; font-size: 0.9rem; }
+
+        #messages {
+            flex-grow: 1; overflow-y: auto; background-color: #efeae2;
+            padding: 15px; display: flex; flex-direction: column; gap: 10px;
+        }
+        .msg { max-width: 80%; padding: 10px 14px; border-radius: 10px; font-size: 0.95rem; word-wrap: break-word; }
+        .msg.me { background-color: #dcf8c6; align-self: flex-end; border-bottom-right-radius: 0; }
+        .msg.friend { background-color: white; align-self: flex-start; border-bottom-left-radius: 0; }
+        .msg.system { background-color: #ffeebc; align-self: center; font-size: 0.8rem; border-radius: 15px; text-align: center; color: #555;}
+        
+        #input-area { 
+            display: flex; padding: 10px; background: #f0f0f0; gap: 10px; flex-shrink: 0; align-items: center;
+        }
+        #input-area input { flex: 1; margin: 0; }
+        #input-area button { width: auto; margin: 0; padding: 12px 20px; }
+
+        .modal-overlay {
+            display: none; position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.7); justify-content: center; align-items: center; z-index: 10;
+        }
+        .modal-box {
+            background: white; padding: 20px; border-radius: 10px; text-align: center; width: 85%; max-width: 350px;
+        }
+        .loading { font-size: 0.9rem; color: #666; text-align: center; margin-top: 10px; }
+        
+        #reader { width: 100%; border-radius: 8px; overflow: hidden; margin: 15px 0; border: none !important;}
+        #reader video { object-fit: cover; }
+        
+        .chat-action-bar {
+            display: flex; gap: 10px; padding: 10px; background: #e9edef; flex-shrink: 0;
+        }
+        .chat-action-bar button { margin: 0; font-size: 0.9rem; }
+    </style>
+</head>
+<body>
+
+<div id="app-container">
+    <div class="header" id="app-header">Yerel Sohbet</div>
+
+    <div id="login-screen" class="screen active">
+        <h3>Bağlantı Ayarları</h3>
+        <label>Adınız:</label>
+        <input type="text" id="my-name" placeholder="Örn: Ahmet" autocomplete="off">
+        <label>Ağ / Oda Adı:</label>
+        <input type="text" id="room-name" value="EvAgi" autocomplete="off">
+        <button id="join-btn">Bağlan ve Keşfet</button>
+    </div>
+
+    <div id="discovery-screen" class="screen">
+        <div class="qr-buttons">
+            <button id="show-qr-btn" class="secondary">QR Göster</button>
+            <button id="scan-qr-btn" class="secondary">QR Tara</button>
+        </div>
+        <hr style="border: 0; border-top: 1px solid #ddd; margin: 0 0 10px 0;">
+        <h3 style="margin-top:0;">Ağdaki Cihazlar</h3>
+        <p class="loading">Cihazlar aranıyor...</p>
+        <ul id="device-list"></ul>
+        <button id="leave-btn" class="danger">Ağdan Ayrıl</button>
+    </div>
+
+    <div id="chat-screen" class="screen" style="padding: 0;">
+        <div class="chat-action-bar">
+            <button id="voice-call-btn" class="secondary">Sesli Ara 📞</button>
+            <button id="disconnect-btn" class="danger">Sohbeti Bitir ✖</button>
+        </div>
+        <div id="messages"></div>
+        <div id="input-area">
+            <input type="text" id="msg-input" placeholder="Mesaj yazın..." autocomplete="off">
+            <button id="send-btn">Gönder</button>
+        </div>
+    </div>
+
+    <div id="connection-modal" class="modal-overlay">
+        <div class="modal-box">
+            <h3 style="margin-top:0;">Gelen Bağlantı</h3>
+            <p id="modal-text">Biri bağlanmak istiyor.</p>
+            <div class="modal-buttons">
+                <button class="danger" id="reject-btn">Reddet</button>
+                <button id="accept-btn">Kabul Et</button>
+            </div>
+        </div>
+    </div>
+    
+    <div id="call-modal" class="modal-overlay">
+        <div class="modal-box">
+            <h3 style="margin-top:0;">Gelen Arama 📞</h3>
+            <p id="call-modal-text">Biri sizi arıyor.</p>
+            <div class="modal-buttons">
+                <button class="danger" id="reject-call-btn">Reddet</button>
+                <button id="accept-call-btn">Cevapla</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="qr-show-modal" class="modal-overlay">
+        <div class="modal-box">
+            <h3 style="margin-top:0;">Kodu Okutun</h3>
+            <div id="qrcode" style="display:flex; justify-content:center; margin: 20px 0;"></div>
+            <p style="font-size: 0.85rem; color: #555;">Kameradan okutarak eşleşebilirsiniz.</p>
+            <button id="close-qr-btn" class="danger">Kapat</button>
+        </div>
+    </div>
+
+    <div id="qr-scan-modal" class="modal-overlay">
+        <div class="modal-box">
+            <h3 style="margin-top:0;">QR Kod Tara</h3>
+            <div id="reader"></div>
+            <button id="close-scan-btn" class="danger">İptal</button>
+        </div>
+    </div>
+    
+    <audio id="remote-audio" autoplay style="display:none;"></audio>
+</div>
+
+<script>
+    let myName = "";
+    let roomTopic = "";
+    let peer = null;
+    let activeConn = null;
+    let mqttClient = null;
+    let discoveredDevices = {}; 
+    let heartbeatInterval = null;
+    let html5QrcodeScanner = null;
+    
+    // Sesli arama için gerekli değişkenler
+    let localStream = null;
+    let activeCall = null;
+    let incomingCallCache = null;
+
+    function showScreen(screenId) {
+        document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+        document.getElementById(screenId).classList.add('active');
+    }
+
+    // Ağa Katılma
+    document.getElementById('join-btn').onclick = () => {
+        myName = document.getElementById('my-name').value.trim();
+        const roomName = document.getElementById('room-name').value.trim();
+        if(!myName || !roomName) return alert("Lütfen adınızı ve ağ adını girin.");
+        
+        roomTopic = "p2p-chat-app-v4/" + roomName;
+        
+        peer = new Peer();
+
+        peer.on('open', (id) => {
+            startDiscovery(id);
+            showScreen('discovery-screen');
+        });
+
+        peer.on('error', (err) => alert("Bağlantı hatası: " + err.type));
+        peer.on('connection', handleIncomingConnection);
+        peer.on('call', handleIncomingCall); // Gelen çağrı dinleyicisi
+    };
+
+    // --- SESLİ ARAMA FONKSİYONLARI BAŞLANGICI ---
+    
+    function handleIncomingCall(call) {
+        if (activeCall) {
+            // Zaten bir görüşme varsa yeni geleni kapat
+            call.close();
+            return;
+        }
+
+        incomingCallCache = call;
+        document.getElementById('call-modal-text').innerText = `Gelen sesli arama...`;
+        document.getElementById('call-modal').style.display = 'flex';
+
+        document.getElementById('accept-call-btn').onclick = () => {
+            document.getElementById('call-modal').style.display = 'none';
+            navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+                .then((stream) => {
+                    localStream = stream;
+                    call.answer(stream);
+                    setupCallEvents(call);
+                })
+                .catch((err) => {
+                    alert("Mikrofon izni alınamadı!");
+                    call.close();
+                });
+        };
+
+        document.getElementById('reject-call-btn').onclick = () => {
+            document.getElementById('call-modal').style.display = 'none';
+            call.close();
+            incomingCallCache = null;
+        };
+    }
+
+    document.getElementById('voice-call-btn').onclick = () => {
+        if (activeCall) {
+            endVoiceCall(); // Arama varsa kapat
+            return;
+        }
+
+        if (!activeConn) return alert("Önce birine bağlanmalısınız.");
+
+        navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+            .then((stream) => {
+                localStream = stream;
+                const call = peer.call(activeConn.peer, stream);
+                setupCallEvents(call);
+                addMessage("Aranıyor...", "system");
+            })
+            .catch((err) => {
+                alert("Mikrofona erişilemedi. Lütfen izin verdiğinizden emin olun.");
+            });
+    };
+
+    function setupCallEvents(call) {
+        activeCall = call;
+        const btn = document.getElementById('voice-call-btn');
+        btn.innerText = "Aramayı Bitir 📞";
+        btn.classList.replace('secondary', 'danger');
+
+        call.on('stream', (remoteStream) => {
+            const remoteAudio = document.getElementById('remote-audio');
+            remoteAudio.srcObject = remoteStream;
+            addMessage("Sesli arama bağlandı.", "system");
+        });
+
+        call.on('close', () => {
+            endVoiceCall(false);
+        });
+        
+        call.on('error', () => {
+            endVoiceCall(false);
+        });
+    }
+
+    function endVoiceCall(triggerClose = true) {
+        if (activeCall && triggerClose) {
+            activeCall.close();
+        }
+        activeCall = null;
+
+        if (localStream) {
+            localStream.getTracks().forEach(track => track.stop());
+            localStream = null;
+        }
+
+        const remoteAudio = document.getElementById('remote-audio');
+        remoteAudio.srcObject = null;
+
+        const btn = document.getElementById('voice-call-btn');
+        if (btn) {
+            btn.innerText = "Sesli Ara 📞";
+            btn.classList.replace('danger', 'secondary');
+        }
+        
+        addMessage("Sesli arama sonlandırıldı.", "system");
+    }
+
+    // --- SESLİ ARAMA FONKSİYONLARI BİTİŞİ ---
+
+    // Cihaz Keşfi (MQTT)
+    function startDiscovery(myPeerId) {
+        mqttClient = mqtt.connect('wss://broker.hivemq.com:8884/mqtt');
+        mqttClient.on('connect', () => {
+            mqttClient.subscribe(roomTopic);
+            heartbeatInterval = setInterval(() => {
+                mqttClient.publish(roomTopic, JSON.stringify({ id: myPeerId, name: myName }));
+            }, 3000);
+        });
+
+        mqttClient.on('message', (topic, message) => {
+            try {
+                const data = JSON.parse(message.toString());
+                if(data.id !== myPeerId) {
+                    discoveredDevices[data.id] = { name: data.name, lastSeen: Date.now() };
+                    updateDeviceList();
+                }
+            } catch(e) {}
+        });
+
+        setInterval(() => {
+            const now = Date.now();
+            for(let id in discoveredDevices) {
+                if(now - discoveredDevices[id].lastSeen > 10000) delete discoveredDevices[id];
+            }
+            updateDeviceList();
+        }, 5000);
+    }
+
+    function updateDeviceList() {
+        const list = document.getElementById('device-list');
+        list.innerHTML = '';
+        const devices = Object.keys(discoveredDevices);
+        if(devices.length === 0) {
+            document.querySelector('.loading').style.display = 'block';
+        } else {
+            document.querySelector('.loading').style.display = 'none';
+            for(let id in discoveredDevices) {
+                const li = document.createElement('li');
+                li.innerHTML = `<strong>${discoveredDevices[id].name}</strong>`;
+                const btn = document.createElement('button');
+                btn.className = 'connect-btn';
+                btn.innerText = 'Bağlan';
+                btn.onclick = () => connectToPeer(id, discoveredDevices[id].name);
+                li.appendChild(btn);
+                list.appendChild(li);
+            }
+        }
+    }
+
+    // QR Göster
+    document.getElementById('show-qr-btn').onclick = () => {
+        if(!peer || !peer.id) return;
+        const qrData = JSON.stringify({ id: peer.id, name: myName });
+        const qrContainer = document.getElementById("qrcode");
+        qrContainer.innerHTML = ""; 
+        new QRCode(qrContainer, { text: qrData, width: 160, height: 160 });
+        document.getElementById('qr-show-modal').style.display = 'flex';
+    };
+
+    // QR Tara (Kamera İşlemi)
+    document.getElementById('scan-qr-btn').onclick = () => {
+        if (window.location.protocol === 'http:' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+            alert("TELEFON İÇİN BİLGİ:\n\nTelefonlar güvenlik nedeniyle HTTP (yerel ağ IP) üzerinden kamerayı açmaz.\n\nKameranın çalışması için dosyayı Netlify veya Vercel gibi ücretsiz bir servise yükleyip HTTPS linki üzerinden giriş yapmalısınız.");
+            return;
+        }
+
+        document.getElementById('qr-scan-modal').style.display = 'flex';
+        
+        if(html5QrcodeScanner) {
+            html5QrcodeScanner.clear().then(() => {
+                startScanner();
+            }).catch(e => {
+                console.error("Tarayıcı temizlenirken hata:", e);
+                startScanner();
+            });
+        } else {
+            startScanner();
+        }
+    };
+
+    function startScanner() {
+        html5QrcodeScanner = new Html5QrcodeScanner(
+            "reader", 
+            { 
+                fps: 10, 
+                qrbox: {width: 200, height: 200},
+                facingMode: "environment"
+            }, 
+            false
+        );
+        html5QrcodeScanner.render(onScanSuccess, (error) => {});
+    }
+
+    function onScanSuccess(decodedText) {
+        if(html5QrcodeScanner) {
+            html5QrcodeScanner.clear().then(() => {
+                html5QrcodeScanner = null;
+                document.getElementById('qr-scan-modal').style.display = 'none';
+            }).catch(e => {
+                document.getElementById('qr-scan-modal').style.display = 'none';
+            });
+        }
+        
+        try {
+            const data = JSON.parse(decodedText);
+            if(data.id && data.name) {
+                if(data.id === peer.id) return alert("Kendi kodunuzu taradınız.");
+                connectToPeer(data.id, data.name);
+            }
+        } catch(e) {
+            alert("Geçersiz QR kodu.");
+        }
+    }
+
+    document.getElementById('close-qr-btn').onclick = () => document.getElementById('qr-show-modal').style.display = 'none';
+    
+    document.getElementById('close-scan-btn').onclick = () => {
+        document.getElementById('qr-scan-modal').style.display = 'none';
+        if(html5QrcodeScanner) {
+            html5QrcodeScanner.clear().then(() => { html5QrcodeScanner = null; });
+        }
+    };
+
+    // Bağlantı İşlemleri
+    function handleIncomingConnection(conn) {
+        document.getElementById('qr-show-modal').style.display = 'none';
+
+        if (activeConn) {
+            const rejectMsg = () => {
+                conn.send(JSON.stringify({ type: 'control', status: 'rejected', reason: 'meşgul' }));
+                setTimeout(() => conn.close(), 500);
+            };
+            if (conn.open) rejectMsg();
+            else conn.on('open', rejectMsg);
+            return;
+        }
+
+        const callerName = conn.metadata ? conn.metadata.callerName : "İsimsiz";
+        document.getElementById('modal-text').innerText = `${callerName} bağlanmak istiyor.`;
+        document.getElementById('connection-modal').style.display = 'flex';
+
+        document.getElementById('accept-btn').onclick = () => {
+            document.getElementById('connection-modal').style.display = 'none';
+            activeConn = conn;
+            setupChatInterface(conn, callerName);
+            
+            const acceptMsg = () => conn.send(JSON.stringify({ type: 'control', status: 'accepted' }));
+            if(conn.open) acceptMsg();
+            else conn.on('open', acceptMsg);
+            
+            showScreen('chat-screen');
+        };
+
+        document.getElementById('reject-btn').onclick = () => {
+            document.getElementById('connection-modal').style.display = 'none';
+            const rejectMsg = () => {
+                conn.send(JSON.stringify({ type: 'control', status: 'rejected' }));
+                setTimeout(() => conn.close(), 500);
+            };
+            if(conn.open) rejectMsg();
+            else conn.on('open', rejectMsg);
+        };
+    }
+
+    function connectToPeer(targetId, targetName) {
+        if(activeConn) return alert("Zaten aktif bir sohbetiniz var.");
+        
+        const conn = peer.connect(targetId, { metadata: { callerName: myName }, reliable: true });
+        
+        conn.on('open', () => {
+            addMessage(`${targetName} cihazına istek gönderildi, onay bekleniyor...`, 'system');
+            showScreen('chat-screen'); 
+            document.getElementById('app-header').innerText = `Bekleniyor...`;
+            document.getElementById('send-btn').disabled = true;
+        });
+
+        conn.on('data', (data) => {
+            try {
+                const msg = JSON.parse(data);
+                if(msg.type === 'control') {
+                    if(msg.status === 'accepted') {
+                        activeConn = conn;
+                        setupChatInterface(conn, targetName);
+                        document.getElementById('send-btn').disabled = false;
+                    } else if(msg.status === 'rejected') {
+                        const reason = msg.reason ? ` (${msg.reason})` : "";
+                        alert(`${targetName} bağlantı isteğinizi reddetti.${reason}`);
+                        showScreen('discovery-screen');
+                        conn.close();
+                        activeConn = null;
+                    }
+                }
+            } catch(e) {}
+        });
+    }
+
+    function setupChatInterface(conn, friendName) {
+        document.getElementById('messages').innerHTML = ''; 
+        document.getElementById('app-header').innerText = `${friendName} ile Sohbet`;
+        addMessage("Bağlantı kuruldu!", "system");
+
+        conn.on('data', (data) => {
+            try {
+                const msg = JSON.parse(data);
+                if(msg.type === 'chat') addMessage(msg.text, 'friend');
+            } catch(e) {}
+        });
+
+        conn.on('close', () => {
+            alert("Sohbet karşı tarafça sonlandırıldı veya bağlantı koptu.");
+            endChat();
+        });
+    }
+
+    function sendMessage() {
+        const input = document.getElementById('msg-input');
+        const text = input.value.trim();
+        if(text && activeConn && activeConn.open) {
+            activeConn.send(JSON.stringify({ type: 'chat', text: text }));
+            addMessage(text, 'me');
+            input.value = '';
+        }
+    }
+
+    document.getElementById('send-btn').onclick = sendMessage;
+    document.getElementById('msg-input').addEventListener('keypress', (e) => {
+        if(e.key === 'Enter') sendMessage();
+    });
+
+    function addMessage(text, sender) {
+        const msgsDiv = document.getElementById('messages');
+        const msgEl = document.createElement('div');
+        msgEl.className = 'msg ' + sender;
+        msgEl.innerText = text;
+        msgsDiv.appendChild(msgEl);
+        msgsDiv.scrollTop = msgsDiv.scrollHeight;
+    }
+
+    function endChat() {
+        if(activeCall) endVoiceCall(true); // Görüşme açıksa kapat
+        if(activeConn) { 
+            activeConn.close(); 
+            activeConn = null; 
+        }
+        showScreen('discovery-screen');
+        document.getElementById('app-header').innerText = 'Yerel Sohbet';
+    }
+
+    document.getElementById('disconnect-btn').onclick = () => {
+        if(confirm("Sohbeti bitirmek istediğinize emin misiniz?")) endChat();
+    };
+
+    document.getElementById('leave-btn').onclick = () => {
+        if(mqttClient) mqttClient.end();
+        if(heartbeatInterval) clearInterval(heartbeatInterval);
+        if(activeCall) endVoiceCall(true);
+        if(activeConn) activeConn.close();
+        if(peer) peer.destroy();
+        activeConn = null;
+        discoveredDevices = {};
+        updateDeviceList();
+        showScreen('login-screen');
+    };
+</script>
+
+</body>
+</html>
